@@ -14,17 +14,17 @@ ProgramAlgorithm::ProgramAlgorithm(std::shared_ptr<const CollectiveProgram> p, i
     data_size = final_data_size = program->bytes;
     comType = program->type; enabled = true;
     for (const auto &task : program->tasks.at(rank)) {
-        if (!task.id || !tasks.emplace(task.id, task).second)
+        if (!task.id || !tasks.emplace(task.id, &task).second)
             throw std::runtime_error("duplicate/zero program task ID");
     }
     for (const auto &[task_id, task] : tasks) {
-        ChakraProtoMsg::Node node; node.set_id(task_id);
-        for (uint64_t parent : task.dependencies) {
+        std::unordered_set<uint64_t> parents;
+        for (uint64_t parent : task->dependencies) {
             if (!tasks.count(parent) || parent >= task_id)
                 throw std::runtime_error("invalid collective dependency");
-            node.add_data_deps(parent);
+            parents.insert(parent);
         }
-        resolver.add_node(node);
+        resolver.add_node(task_id, parents);
     }
     if (!tasks.empty()) resolver.resolve_dependancy_free_nodes();
 }
@@ -62,7 +62,7 @@ void ProgramAlgorithm::pump() {
     std::vector<uint64_t> candidates(free.begin(), free.end());
     std::sort(candidates.begin(), candidates.end());
     for (uint64_t task_id : candidates) {
-        const auto &task = tasks.at(task_id);
+        const auto &task = *tasks.at(task_id);
         ready_times.emplace(task_id, uint64_t(Sys::boostedTick()));
         if (task.kind == ProgramTaskKind::Send && !hw->acquire_send()) continue;
         if (task.kind == ProgramTaskKind::Compute && !hw->acquire_gpu()) continue;
@@ -99,7 +99,7 @@ void ProgramAlgorithm::pump() {
     }
 }
 void ProgramAlgorithm::complete(uint64_t task_id) {
-    const auto &task = tasks.at(task_id);
+    const auto &task = *tasks.at(task_id);
     auto *hw = stream->owner->workload->hw_resource;
     if (task.kind == ProgramTaskKind::Send) {
         hw->release_send();

@@ -14,8 +14,10 @@ class ProgramAlgorithm final : public Algorithm {
   private:
     std::shared_ptr<const CollectiveProgram> program;
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
-    Chakra::FeederV3::DependancyResolver resolver{true, false};
-    std::map<uint64_t, ProgramTask> tasks;
+    // Programs contain data dependencies only: reuse Chakra's existing layer
+    // without duplicating it into data/control/combined graphs.
+    Chakra::FeederV3::_DependancyLayer resolver;
+    std::map<uint64_t, const ProgramTask *> tasks;
     std::map<uint64_t, uint64_t> ready_times, issue_times;
     size_t finished = 0;
     uint64_t watcher = 0;
