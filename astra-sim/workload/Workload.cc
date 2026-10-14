@@ -4,6 +4,9 @@ LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
 #include "astra-sim/workload/Workload.hh"
+#ifdef ASTRA_SIM_OMRC
+#include "RuntimeHook.hh"
+#endif
 
 #include "astra-sim/common/Logging.hh"
 #include "astra-sim/system/IntData.hh"
@@ -143,6 +146,24 @@ void Workload::issue_dep_free_nodes() {
     }
     for (const auto node_id : dependancy_free_nodes_set) {
         std::shared_ptr<ETFeederNode> node = et_feeder->lookupNode(node_id);
+#ifdef ASTRA_SIM_OMRC
+        // Global dependencies gate prerequisite compute as well as collective
+        // readiness. Blocked nodes stay pending until the controller wakes us.
+        if (node->has_attr("omrc_dependency_instance") &&
+            !omrc::runtime_dependencies_ready(
+                node->get_attr<uint64_t>("omrc_dependency_instance"))) {
+            continue;
+        }
+        if (node->has_attr("omrc_instance") &&
+            !omrc::runtime_ready(sys->id,
+                                node->get_attr<uint64_t>("omrc_instance"))) {
+            continue;
+        }
+        if (node->type() == ChakraNodeType::COMP_NODE &&
+            !omrc::compute_available(sys->id)) {
+            continue;
+        }
+#endif
         if (hw_resource->is_available(node)) {
             issue(node);
         }
@@ -344,6 +365,28 @@ void Workload::issue_coll_comm(
     // same pg
     const auto comm_priority = node->comm_priority<uint32_t>();  // default 0u
 
+#ifdef ASTRA_SIM_OMRC
+    // All participants consume one controller plan. Register the normal ASTRA
+    // completion notifier before deferred runtime operations can finish.
+    if (node->has_attr("omrc_instance")) {
+        const auto& plan =
+            omrc::runtime_plan(node->get_attr<uint64_t>("omrc_instance"));
+        DataSet* fp = nullptr;
+        if (comm_type == ChakraCollectiveCommType::ALL_REDUCE) {
+            fp = sys->generate_all_reduce(comm_size, involved_dims, comm_group,
+                                          comm_priority, node->id(), plan);
+        } else if (comm_type == ChakraCollectiveCommType::ALL_TO_ALL) {
+            fp = sys->generate_all_to_all(comm_size, involved_dims, comm_group,
+                                          comm_priority, node->id(), plan);
+        } else {
+            throw std::runtime_error("unsupported O-MRC collective");
+        }
+        collective_comm_node_id_map[fp->my_id] = node->id();
+        collective_comm_wrapper_map[fp->my_id] = fp;
+        fp->set_notifier(this, EventType::CollectiveCommunicationFinished);
+        return;
+    }
+#endif
     if (comm_type == ChakraCollectiveCommType::ALL_REDUCE) {
         DataSet* fp = sys->generate_all_reduce(comm_size, involved_dims,
                                                comm_group, comm_priority, node->id());

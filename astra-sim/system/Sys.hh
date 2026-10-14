@@ -20,6 +20,12 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/astraccl/native_collectives/logical_topology/RingTopology.hh"
 #include "astra-sim/workload/Workload.hh"
 
+#ifdef ASTRA_SIM_OMRC
+namespace omrc {
+struct RecoveryPlan;
+}
+#endif
+
 namespace AstraSim {
 
 class BaseStream;
@@ -133,6 +139,22 @@ class Sys : public Callable {
                                  CommunicatorGroup* communicator_group,
                                  int explicit_priority,
                                  uint64_t workload_node_id = -1);
+#ifdef ASTRA_SIM_OMRC
+    // O-MRC supplies a shared runtime plan; ordinary native collectives retain
+    // their existing entry points when this integration is disabled.
+    DataSet* generate_all_reduce(uint64_t size,
+                                 std::vector<bool> involved_dims,
+                                 CommunicatorGroup* comm_group,
+                                 int priority,
+                                 uint64_t node_id,
+                                 const omrc::RecoveryPlan& recovery_plan);
+    DataSet* generate_all_to_all(uint64_t size,
+                                 std::vector<bool> involved_dims,
+                                 CommunicatorGroup* comm_group,
+                                 int priority,
+                                 uint64_t node_id,
+                                 const omrc::RecoveryPlan& recovery_plan);
+#endif
     DataSet* generate_all_gather(uint64_t size,
                                  std::vector<bool> involved_dimensions,
                                  CommunicatorGroup* communicator_group,
