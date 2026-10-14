@@ -10,6 +10,7 @@ LICENSE file in the root directory of this source tree.
 
 #include "astra-sim/common/Logging.hh"
 #include "astra-sim/system/IntData.hh"
+#include "astra-sim/system/ComputeExecution.hh"
 #include "astra-sim/system/MemEventHandlerData.hh"
 #include "astra-sim/system/RecvPacketEventHandlerData.hh"
 #include "astra-sim/system/SendPacketEventHandlerData.hh"
@@ -159,11 +160,9 @@ void Workload::issue_dep_free_nodes() {
                                 node->get_attr<uint64_t>("omrc_instance"))) {
             continue;
         }
-        if (node->type() == ChakraNodeType::COMP_NODE &&
-            !omrc::compute_available(sys->id)) {
-            continue;
-        }
 #endif
+        if (sys->compute_execution && node->type() == ChakraNodeType::COMP_NODE && !node->is_cpu_op())
+            compute_ready_times.emplace(node->id(), uint64_t(Sys::boostedTick()));
         if (hw_resource->is_available(node)) {
             issue(node);
         }
@@ -271,6 +270,15 @@ void Workload::issue_comp(shared_ptr<Chakra::FeederV3::ETFeederNode> node) {
     WorkloadLayerHandlerData* wlhd = new WorkloadLayerHandlerData;
     wlhd->node_id = node->id();
 
+    if (sys->compute_execution) {
+        uint64_t operations = node->num_ops<uint64_t>();
+        uint64_t memory = node->get_attr<uint64_t>("memory_bytes", node->tensor_size<uint64_t>());
+        sys->compute_execution->duration(operations, memory); // Validate before scheduling.
+        sys->compute_execution->execute_reserved(UINT64_MAX, node->id(), operations, memory,
+            compute_ready_times.at(node->id()), "workload", [this, wlhd]() { call(EventType::General, wlhd); });
+        compute_ready_times.erase(node->id());
+        return;
+    }
     double num_ops = static_cast<double>(node->num_ops<uint64_t>());
     double tensor_size = static_cast<double>(node->tensor_size<uint64_t>());
 

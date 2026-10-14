@@ -10,6 +10,8 @@ LICENSE file in the root directory of this source tree.
 
 #include "astra-sim/common/Logging.hh"
 #include <cstdint>
+#include <functional>
+#include <map>
 
 #include "extern/graph_frontend/chakra/src/feeder_v3/et_feeder.h"
 
@@ -42,6 +44,19 @@ class HardwareResource {
     bool is_available(
         const std::shared_ptr<Chakra::FeederV3::ETFeederNode> node) const;
     void report();
+    void configure_programs(int slots);
+    bool program_execution() const { return leaf_accounting; }
+    bool acquire_gpu();
+    bool acquire_send();
+    void release_gpu();
+    void release_send();
+    uint64_t watch(std::function<void()> callback);
+    void unwatch(uint64_t id) { watchers.erase(id); }
+    void notify_available();
+    bool leaf_accounting = false;
+    int send_capacity = 1;
+    uint64_t next_watcher = 1;
+    std::map<uint64_t, std::function<void()>> watchers;
 
     std::unordered_set<uint64_t> cpu_ops_node;
     std::unordered_set<uint64_t> gpu_ops_node;

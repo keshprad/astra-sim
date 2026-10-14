@@ -33,6 +33,7 @@ struct sim_request {
     uint64_t reqCount;
     uint32_t vnet;
     uint32_t layerNum;
+    uint64_t transfer_id = 0; // Optional opaque descriptor identity; ordinary backends ignore it.
 };
 
 class MetaData {

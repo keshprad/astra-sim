@@ -35,6 +35,7 @@ HardwareResource::HardwareResource(uint32_t num_npus, int sys_id)
 
 void HardwareResource::occupy(
     const shared_ptr<Chakra::FeederV3::ETFeederNode> node) {
+    if (leaf_accounting && node->type() == ChakraNodeType::COMM_COLL_NODE) return;
     if (node->is_cpu_op()) {
         assert(num_in_flight_cpu_ops == 0);
         ++num_in_flight_cpu_ops;
@@ -51,7 +52,7 @@ void HardwareResource::occupy(
             if (node->type() == ChakraNodeType::COMM_RECV_NODE) {
                 return;
             }
-            assert(num_in_flight_gpu_comm_ops == 0);
+            assert(num_in_flight_gpu_comm_ops < uint32_t(send_capacity));
             ++num_in_flight_gpu_comm_ops;
             ++num_gpu_comms;
             // gpu_comms_node = node;
@@ -62,6 +63,7 @@ void HardwareResource::occupy(
 
 void HardwareResource::release(
     const shared_ptr<Chakra::FeederV3::ETFeederNode> node) {
+    if (leaf_accounting && node->type() == ChakraNodeType::COMM_COLL_NODE) return;
     if (node->is_cpu_op()) {
         --num_in_flight_cpu_ops;
         assert(num_in_flight_cpu_ops == 0);
@@ -76,14 +78,18 @@ void HardwareResource::release(
                 return;
             }
             --num_in_flight_gpu_comm_ops;
-            assert(num_in_flight_gpu_comm_ops == 0);
+            assert(num_in_flight_gpu_comm_ops < uint32_t(send_capacity));
             this->gpu_comms_node.erase(node->id());
         }
     }
+    notify_available();
 }
 
 bool HardwareResource::is_available(
     const shared_ptr<Chakra::FeederV3::ETFeederNode> node) const {
+    if (leaf_accounting && node->type() == ChakraNodeType::COMM_COLL_NODE) return true;
+    if (leaf_accounting && !node->is_cpu_op() && node->type() != ChakraNodeType::COMP_NODE)
+        return node->type() == ChakraNodeType::COMM_RECV_NODE || num_in_flight_gpu_comm_ops < uint32_t(send_capacity);
     if (node->is_cpu_op()) {
         if (num_in_flight_cpu_ops == 0) {
             return true;
@@ -121,4 +127,33 @@ void HardwareResource::report() {
     cout << "tics_cpu_ops: " << tics_cpu_ops << endl;
     cout << "tics_gpu_ops: " << tics_gpu_ops << endl;
     cout << "tics_gpu_comms: " << tics_gpu_comms << endl;
+}
+
+#include <stdexcept>
+void HardwareResource::configure_programs(int slots) {
+    if (slots <= 0) throw std::runtime_error("send capacity must be positive");
+    leaf_accounting = true; send_capacity = slots;
+}
+bool HardwareResource::acquire_gpu() {
+    if (num_in_flight_gpu_comp_ops) return false;
+    ++num_in_flight_gpu_comp_ops; ++num_gpu_ops; return true;
+}
+bool HardwareResource::acquire_send() {
+    if (num_in_flight_gpu_comm_ops >= uint32_t(send_capacity)) return false;
+    ++num_in_flight_gpu_comm_ops; ++num_gpu_comms; return true;
+}
+void HardwareResource::release_gpu() {
+    if (!num_in_flight_gpu_comp_ops) throw std::runtime_error("GPU resource released twice");
+    --num_in_flight_gpu_comp_ops; notify_available();
+}
+void HardwareResource::release_send() {
+    if (!num_in_flight_gpu_comm_ops) throw std::runtime_error("send resource released twice");
+    --num_in_flight_gpu_comm_ops; notify_available();
+}
+uint64_t HardwareResource::watch(std::function<void()> callback) {
+    uint64_t id = next_watcher++; watchers.emplace(id, std::move(callback)); return id;
+}
+void HardwareResource::notify_available() {
+    const auto callbacks = watchers;
+    for (const auto &[id, fn] : callbacks) fn();
 }
