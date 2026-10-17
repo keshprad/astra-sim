@@ -291,7 +291,7 @@ class Sys : public Callable {
     bool track_local_mem;
     std::string local_mem_trace_filename;
     ComputeExecution *compute_execution = nullptr;
-    void enable_program_execution(int send_slots);
+    void enable_program_execution();
     DataSet *generate_program(std::shared_ptr<const CollectiveProgram> program);
     double local_mem_bw;
     AstraRemoteMemoryAPI* remote_mem;

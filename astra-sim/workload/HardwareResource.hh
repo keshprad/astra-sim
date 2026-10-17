@@ -44,17 +44,16 @@ class HardwareResource {
     bool is_available(
         const std::shared_ptr<Chakra::FeederV3::ETFeederNode> node) const;
     void report();
-    void configure_programs(int slots);
+    void configure_programs();
     bool program_execution() const { return leaf_accounting; }
     bool acquire_gpu();
-    bool acquire_send();
+    void record_send();
     void release_gpu();
     void release_send();
     uint64_t watch(std::function<void()> callback);
     void unwatch(uint64_t id) { watchers.erase(id); }
     void notify_available();
     bool leaf_accounting = false;
-    int send_capacity = 1;
     uint64_t next_watcher = 1;
     std::map<uint64_t, std::function<void()>> watchers;
 

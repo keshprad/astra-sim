@@ -64,7 +64,7 @@ void ProgramAlgorithm::pump() {
     for (uint64_t task_id : candidates) {
         const auto &task = *tasks.at(task_id);
         ready_times.emplace(task_id, uint64_t(Sys::boostedTick()));
-        if (task.kind == ProgramTaskKind::Send && !hw->acquire_send()) continue;
+        if (task.kind == ProgramTaskKind::Send) hw->record_send();
         if (task.kind == ProgramTaskKind::Compute && !hw->acquire_gpu()) continue;
         resolver.take_node(task_id);
         issue_times[task_id] = Sys::boostedTick();
@@ -121,9 +121,9 @@ void ProgramAlgorithm::complete(uint64_t task_id) {
     request_pump();
 }
 
-void Sys::enable_program_execution(int send_slots) {
+void Sys::enable_program_execution() {
     if (compute_execution) throw std::runtime_error("program execution enabled twice");
-    workload->hw_resource->configure_programs(send_slots);
+    workload->hw_resource->configure_programs();
     compute_execution = new ComputeExecution(this);
 }
 DataSet *Sys::generate_program(std::shared_ptr<const CollectiveProgram> program) {

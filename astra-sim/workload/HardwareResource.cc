@@ -52,7 +52,7 @@ void HardwareResource::occupy(
             if (node->type() == ChakraNodeType::COMM_RECV_NODE) {
                 return;
             }
-            assert(num_in_flight_gpu_comm_ops < uint32_t(send_capacity));
+            if (!leaf_accounting) assert(num_in_flight_gpu_comm_ops == 0);
             ++num_in_flight_gpu_comm_ops;
             ++num_gpu_comms;
             // gpu_comms_node = node;
@@ -78,7 +78,7 @@ void HardwareResource::release(
                 return;
             }
             --num_in_flight_gpu_comm_ops;
-            assert(num_in_flight_gpu_comm_ops < uint32_t(send_capacity));
+            if (!leaf_accounting) assert(num_in_flight_gpu_comm_ops == 0);
             this->gpu_comms_node.erase(node->id());
         }
     }
@@ -89,7 +89,7 @@ bool HardwareResource::is_available(
     const shared_ptr<Chakra::FeederV3::ETFeederNode> node) const {
     if (leaf_accounting && node->type() == ChakraNodeType::COMM_COLL_NODE) return true;
     if (leaf_accounting && !node->is_cpu_op() && node->type() != ChakraNodeType::COMP_NODE)
-        return node->type() == ChakraNodeType::COMM_RECV_NODE || num_in_flight_gpu_comm_ops < uint32_t(send_capacity);
+        return true;
     if (node->is_cpu_op()) {
         if (num_in_flight_cpu_ops == 0) {
             return true;
@@ -130,17 +130,16 @@ void HardwareResource::report() {
 }
 
 #include <stdexcept>
-void HardwareResource::configure_programs(int slots) {
-    if (slots <= 0) throw std::runtime_error("send capacity must be positive");
-    leaf_accounting = true; send_capacity = slots;
+void HardwareResource::configure_programs() {
+    leaf_accounting = true;
 }
 bool HardwareResource::acquire_gpu() {
     if (num_in_flight_gpu_comp_ops) return false;
     ++num_in_flight_gpu_comp_ops; ++num_gpu_ops; return true;
 }
-bool HardwareResource::acquire_send() {
-    if (num_in_flight_gpu_comm_ops >= uint32_t(send_capacity)) return false;
-    ++num_in_flight_gpu_comm_ops; ++num_gpu_comms; return true;
+void HardwareResource::record_send() {
+    // Accounting only: physical link queues govern send progress.
+    ++num_in_flight_gpu_comm_ops; ++num_gpu_comms;
 }
 void HardwareResource::release_gpu() {
     if (!num_in_flight_gpu_comp_ops) throw std::runtime_error("GPU resource released twice");
