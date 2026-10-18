@@ -50,6 +50,10 @@ class Workload : public Callable {
     void skip_invalid(std::shared_ptr<Chakra::FeederV3::ETFeederNode> node);
     void call(EventType event, CallData* data);
     void fire();
+    // Reuse an immutable Chakra iteration without restarting the simulated Sys,
+    // network, resources or clock. Only call after this rank's DAG has retired.
+    void restart_iteration();
+    std::string iteration_filename;
 
     // stats
     void report();

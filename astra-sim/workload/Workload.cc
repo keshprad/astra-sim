@@ -31,6 +31,7 @@ typedef ChakraProtoMsg::CollectiveCommType ChakraCollectiveCommType;
 
 Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     string workload_filename = et_filename + "." + to_string(sys->id) + ".et";
+    iteration_filename = workload_filename;
     // Check if workload filename exists
     if (access(workload_filename.c_str(), R_OK) < 0) {
         string error_msg;
@@ -148,6 +149,7 @@ void Workload::issue_dep_free_nodes() {
     for (const auto node_id : dependancy_free_nodes_set) {
         std::shared_ptr<ETFeederNode> node = et_feeder->lookupNode(node_id);
 #ifdef ASTRA_SIM_OMRC
+        if (node->has_attr("omrc_workload") && !omrc::runtime_workload_ready(sys->id)) continue;
         // Global dependencies gate prerequisite compute as well as collective
         // readiness. Blocked nodes stay pending until the controller wakes us.
         if (node->has_attr("omrc_dependency_instance") &&
@@ -378,7 +380,7 @@ void Workload::issue_coll_comm(
     // completion notifier before deferred runtime operations can finish.
     if (node->has_attr("omrc_instance")) {
         const auto& plan =
-            omrc::runtime_plan(node->get_attr<uint64_t>("omrc_instance"));
+            omrc::runtime_rank_plan(sys->id, node->get_attr<uint64_t>("omrc_instance"));
         DataSet* fp = nullptr;
         if (comm_type == ChakraCollectiveCommType::ALL_REDUCE) {
             fp = sys->generate_all_reduce(comm_size, involved_dims, comm_group,
@@ -386,6 +388,9 @@ void Workload::issue_coll_comm(
         } else if (comm_type == ChakraCollectiveCommType::ALL_TO_ALL) {
             fp = sys->generate_all_to_all(comm_size, involved_dims, comm_group,
                                           comm_priority, node->id(), plan);
+        } else if (comm_type == ChakraCollectiveCommType::ALL_GATHER ||
+                   comm_type == ChakraCollectiveCommType::REDUCE_SCATTER) {
+            fp = omrc::execute_plan(sys, plan);
         } else {
             throw std::runtime_error("unsupported O-MRC collective");
         }
@@ -531,6 +536,10 @@ void Workload::call(EventType event, CallData* data) {
         hw_resource->release(node);
         stats->record_end(node, Sys::boostedTick());
 
+#ifdef ASTRA_SIM_OMRC
+        omrc::runtime_node_finished(sys->id, node->id(), stats->get_operator_statistics(node->id()).start_time, Sys::boostedTick());
+#endif
+
         // Calculate network bandwidth
         auto& op_stat = stats->get_operator_statistics(node_id);
         Tick execution_time = int_data->execution_time;
@@ -571,6 +580,9 @@ void Workload::call(EventType event, CallData* data) {
 
             hw_resource->release(node);
             stats->record_end(node, Sys::boostedTick());
+#ifdef ASTRA_SIM_OMRC
+            omrc::runtime_node_finished(sys->id, node->id(), stats->get_operator_statistics(node->id()).start_time, Sys::boostedTick());
+#endif
 
             // Calculate network bandwidth for point-to-point communications
             if (event == EventType::PacketSent ||
@@ -606,6 +618,12 @@ void Workload::call(EventType event, CallData* data) {
         (hw_resource->num_in_flight_cpu_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comp_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comm_ops == 0)) {
+#ifdef ASTRA_SIM_OMRC
+        if (omrc::runtime_iteration_finished(sys->id)) {
+            is_finished = true;
+            return;
+        }
+#endif
         report();
         sys->comm_NI->sim_notify_finished();
         is_finished = true;
@@ -614,6 +632,18 @@ void Workload::call(EventType event, CallData* data) {
 
 void Workload::fire() {
     call(EventType::General, NULL);
+}
+
+void Workload::restart_iteration() {
+    if (!is_finished || hw_resource->num_in_flight_gpu_comp_ops || hw_resource->num_in_flight_gpu_comm_ops)
+        throw std::runtime_error("iteration replay requires this rank's retired DAG");
+    delete et_feeder;
+    et_feeder = new ETFeeder(iteration_filename);
+    delete stats;
+    stats = new Statistics(this);
+    compute_ready_times.clear();
+    is_finished = false;
+    fire();
 }
 
 void Workload::report() {
