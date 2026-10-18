@@ -50,6 +50,10 @@ class Workload : public Callable {
     void skip_invalid(std::shared_ptr<Chakra::FeederV3::ETFeederNode> node);
     void call(EventType event, CallData* data);
     void fire();
+    // Reuse an immutable Chakra iteration without restarting the simulated Sys,
+    // network, resources or clock. Only call after this rank's DAG has retired.
+    void restart_iteration();
+    std::string iteration_filename;
 
     // stats
     void report();
@@ -63,6 +67,7 @@ class Workload : public Callable {
     std::unordered_map<int, uint64_t> collective_comm_node_id_map;
     std::unordered_map<int, DataSet*> collective_comm_wrapper_map;
     bool is_finished;
+    std::unordered_map<uint64_t, uint64_t> compute_ready_times;
 
   private:
     // From the ET node, find out the corresponding communicator group, and

@@ -24,6 +24,7 @@ LICENSE file in the root directory of this source tree.
 #include "astra-sim/system/WorkloadLayerHandlerData.hh"
 #include "astra-sim/system/astraccl/CollectiveImpl.hh"
 #include "astra-sim/system/astraccl/custom_collectives/CustomAlgorithm.hh"
+#include "astra-sim/system/ComputeExecution.hh"
 #include "astra-sim/system/astraccl/native_collectives/collective_algorithm/AllToAll.hh"
 #include "astra-sim/system/astraccl/native_collectives/collective_algorithm/DoubleBinaryTreeAllReduce.hh"
 #include "astra-sim/system/astraccl/native_collectives/collective_algorithm/HalvingDoubling.hh"
@@ -264,6 +265,7 @@ Sys::Sys(int id,
 }
 
 Sys::~Sys() {
+    delete compute_execution;
     if (roofline_enabled) {
         delete this->roofline;
     }
@@ -1180,7 +1182,9 @@ void Sys::proceed_to_next_vnet_baseline(StreamBaseline* stream) {
         first_phase_streams--;
     }
     if (stream->steps_finished != 0) {
-        stream->net_message_latency.back() /= stream->net_message_counter;
+        if (stream->net_message_counter)
+            stream->net_message_latency.back() /= stream->net_message_counter;
+        else stream->net_message_latency.back() = 0;
     }
     if (stream->my_current_phase.algorithm != nullptr) {
         delete stream->my_current_phase.algorithm;

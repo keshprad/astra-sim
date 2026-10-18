@@ -4,9 +4,13 @@ LICENSE file in the root directory of this source tree.
 *******************************************************************************/
 
 #include "astra-sim/workload/Workload.hh"
+#ifdef ASTRA_SIM_OMRC
+#include "RuntimeHook.hh"
+#endif
 
 #include "astra-sim/common/Logging.hh"
 #include "astra-sim/system/IntData.hh"
+#include "astra-sim/system/ComputeExecution.hh"
 #include "astra-sim/system/MemEventHandlerData.hh"
 #include "astra-sim/system/RecvPacketEventHandlerData.hh"
 #include "astra-sim/system/SendPacketEventHandlerData.hh"
@@ -27,6 +31,7 @@ typedef ChakraProtoMsg::CollectiveCommType ChakraCollectiveCommType;
 
 Workload::Workload(Sys* sys, string et_filename, string comm_group_filename) {
     string workload_filename = et_filename + "." + to_string(sys->id) + ".et";
+    iteration_filename = workload_filename;
     // Check if workload filename exists
     if (access(workload_filename.c_str(), R_OK) < 0) {
         string error_msg;
@@ -143,6 +148,23 @@ void Workload::issue_dep_free_nodes() {
     }
     for (const auto node_id : dependancy_free_nodes_set) {
         std::shared_ptr<ETFeederNode> node = et_feeder->lookupNode(node_id);
+#ifdef ASTRA_SIM_OMRC
+        if (node->has_attr("omrc_workload") && !omrc::runtime_workload_ready(sys->id)) continue;
+        // Global dependencies gate prerequisite compute as well as collective
+        // readiness. Blocked nodes stay pending until the controller wakes us.
+        if (node->has_attr("omrc_dependency_instance") &&
+            !omrc::runtime_dependencies_ready(
+                node->get_attr<uint64_t>("omrc_dependency_instance"))) {
+            continue;
+        }
+        if (node->has_attr("omrc_instance") &&
+            !omrc::runtime_ready(sys->id,
+                                node->get_attr<uint64_t>("omrc_instance"))) {
+            continue;
+        }
+#endif
+        if (sys->compute_execution && node->type() == ChakraNodeType::COMP_NODE && !node->is_cpu_op())
+            compute_ready_times.emplace(node->id(), uint64_t(Sys::boostedTick()));
         if (hw_resource->is_available(node)) {
             issue(node);
         }
@@ -250,6 +272,15 @@ void Workload::issue_comp(shared_ptr<Chakra::FeederV3::ETFeederNode> node) {
     WorkloadLayerHandlerData* wlhd = new WorkloadLayerHandlerData;
     wlhd->node_id = node->id();
 
+    if (sys->compute_execution) {
+        uint64_t operations = node->num_ops<uint64_t>();
+        uint64_t memory = node->get_attr<uint64_t>("memory_bytes", node->tensor_size<uint64_t>());
+        sys->compute_execution->duration(operations, memory); // Validate before scheduling.
+        sys->compute_execution->execute_reserved(UINT64_MAX, node->id(), operations, memory,
+            compute_ready_times.at(node->id()), "workload", [this, wlhd]() { call(EventType::General, wlhd); });
+        compute_ready_times.erase(node->id());
+        return;
+    }
     double num_ops = static_cast<double>(node->num_ops<uint64_t>());
     double tensor_size = static_cast<double>(node->tensor_size<uint64_t>());
 
@@ -344,6 +375,31 @@ void Workload::issue_coll_comm(
     // same pg
     const auto comm_priority = node->comm_priority<uint32_t>();  // default 0u
 
+#ifdef ASTRA_SIM_OMRC
+    // All participants consume one controller plan. Register the normal ASTRA
+    // completion notifier before deferred runtime operations can finish.
+    if (node->has_attr("omrc_instance")) {
+        const auto& plan =
+            omrc::runtime_rank_plan(sys->id, node->get_attr<uint64_t>("omrc_instance"));
+        DataSet* fp = nullptr;
+        if (comm_type == ChakraCollectiveCommType::ALL_REDUCE) {
+            fp = sys->generate_all_reduce(comm_size, involved_dims, comm_group,
+                                          comm_priority, node->id(), plan);
+        } else if (comm_type == ChakraCollectiveCommType::ALL_TO_ALL) {
+            fp = sys->generate_all_to_all(comm_size, involved_dims, comm_group,
+                                          comm_priority, node->id(), plan);
+        } else if (comm_type == ChakraCollectiveCommType::ALL_GATHER ||
+                   comm_type == ChakraCollectiveCommType::REDUCE_SCATTER) {
+            fp = omrc::execute_plan(sys, plan);
+        } else {
+            throw std::runtime_error("unsupported O-MRC collective");
+        }
+        collective_comm_node_id_map[fp->my_id] = node->id();
+        collective_comm_wrapper_map[fp->my_id] = fp;
+        fp->set_notifier(this, EventType::CollectiveCommunicationFinished);
+        return;
+    }
+#endif
     if (comm_type == ChakraCollectiveCommType::ALL_REDUCE) {
         DataSet* fp = sys->generate_all_reduce(comm_size, involved_dims,
                                                comm_group, comm_priority, node->id());
@@ -480,6 +536,10 @@ void Workload::call(EventType event, CallData* data) {
         hw_resource->release(node);
         stats->record_end(node, Sys::boostedTick());
 
+#ifdef ASTRA_SIM_OMRC
+        omrc::runtime_node_finished(sys->id, node->id(), stats->get_operator_statistics(node->id()).start_time, Sys::boostedTick());
+#endif
+
         // Calculate network bandwidth
         auto& op_stat = stats->get_operator_statistics(node_id);
         Tick execution_time = int_data->execution_time;
@@ -520,6 +580,9 @@ void Workload::call(EventType event, CallData* data) {
 
             hw_resource->release(node);
             stats->record_end(node, Sys::boostedTick());
+#ifdef ASTRA_SIM_OMRC
+            omrc::runtime_node_finished(sys->id, node->id(), stats->get_operator_statistics(node->id()).start_time, Sys::boostedTick());
+#endif
 
             // Calculate network bandwidth for point-to-point communications
             if (event == EventType::PacketSent ||
@@ -555,6 +618,12 @@ void Workload::call(EventType event, CallData* data) {
         (hw_resource->num_in_flight_cpu_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comp_ops == 0) &&
         (hw_resource->num_in_flight_gpu_comm_ops == 0)) {
+#ifdef ASTRA_SIM_OMRC
+        if (omrc::runtime_iteration_finished(sys->id)) {
+            is_finished = true;
+            return;
+        }
+#endif
         report();
         sys->comm_NI->sim_notify_finished();
         is_finished = true;
@@ -563,6 +632,18 @@ void Workload::call(EventType event, CallData* data) {
 
 void Workload::fire() {
     call(EventType::General, NULL);
+}
+
+void Workload::restart_iteration() {
+    if (!is_finished || hw_resource->num_in_flight_gpu_comp_ops || hw_resource->num_in_flight_gpu_comm_ops)
+        throw std::runtime_error("iteration replay requires this rank's retired DAG");
+    delete et_feeder;
+    et_feeder = new ETFeeder(iteration_filename);
+    delete stats;
+    stats = new Statistics(this);
+    compute_ready_times.clear();
+    is_finished = false;
+    fire();
 }
 
 void Workload::report() {
